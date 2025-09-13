@@ -1,0 +1,2 @@
+# many-mailer
+Mailing labs
