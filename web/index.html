@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>many-mailer — Test Page</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica,
+          Arial, sans-serif;
+        margin: 2rem;
+        line-height: 1.5;
+      }
+      .ok {
+        padding: 0.5rem 0.75rem;
+        background: #e6ffed;
+        border: 1px solid #b7f5c2;
+        border-radius: 6px;
+        display: inline-block;
+      }
+      .muted {
+        color: #666;
+      }
+      code {
+        background: rgba(125, 125, 125, 0.1);
+        padding: 0.1rem 0.3rem;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>many-mailer</h1>
+    <p class="ok">GitHub Pages test page loaded.</p>
+
+    <h2>Checks</h2>
+    <ul>
+      <li>Build path: <code>/web/index.html</code></li>
+      <li>Page URL (expected): <span id="url" class="muted"></span></li>
+      <li>Loaded at: <span id="ts" class="muted"></span></li>
+    </ul>
+
+    <h2>Client-side test</h2>
+    <p>
+      This button runs a simple fetch to this same page (should return 200):
+    </p>
+    <button id="btn">Run fetch test</button>
+    <pre id="out" class="muted"></pre>
+
+    <script>
+      // Populate info
+      document.getElementById("url").textContent = location.href;
+      document.getElementById("ts").textContent = new Date().toString();
+
+      // Simple fetch to verify CORS/hosting works
+      document.getElementById("btn").addEventListener("click", async () => {
+        const out = document.getElementById("out");
+        out.textContent = "Fetching...";
+        try {
+          const resp = await fetch(location.href, {
+            method: "GET",
+            cache: "no-store",
+          });
+          out.textContent = `Status: ${resp.status} ${
+            resp.statusText
+          }\nContent-Type: ${resp.headers.get("content-type")}`;
+        } catch (e) {
+          out.textContent = "Fetch error: " + (e && e.message ? e.message : e);
+        }
+      });
+    </script>
+
+    <hr />
+    <p class="muted">
+      If you see this page at your GitHub Pages URL, your Pages config is
+      working.
+    </p>
+  </body>
+</html>
