@@ -41,6 +41,10 @@ jobs:
           zip -r ../infra/artifacts/lambda.zip ./*
         shell: bash
 
+      - name: Verify Lambda artifact exists
+        run: |
+          test -f infra/artifacts/lambda.zip || { echo "lambda.zip missing"; exit 1; }
+
       - name: Terraform Init
         run: terraform init
         working-directory: infra

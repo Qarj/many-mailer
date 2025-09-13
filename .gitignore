@@ -147,3 +147,9 @@ tmp/
 Thumbs.db
 .idea/
 private/
+# Terraform
+infra/.terraform/
+infra/.terraform.lock.hcl
+infra/terraform.tfstate*
+# Lambda build artifacts
+infra/artifacts/
