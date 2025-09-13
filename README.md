@@ -11,3 +11,5 @@ https://console.aws.amazon.com/
 https://signin.aws.amazon.com/console
 
 ## case fix
+
+## pingable
