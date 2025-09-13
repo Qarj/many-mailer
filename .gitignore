@@ -137,3 +137,13 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# This project
+dist/
+build/
+temp/
+tmp/
+.DS_Store
+Thumbs.db
+.idea/
+private/
