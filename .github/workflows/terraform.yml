@@ -1,0 +1,53 @@
+name: Terraform
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan-apply:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: eu-west-1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::381354916781:role/GitHubActionsDeployRole
+          aws-region: eu-west-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Prepare Lambda artifact
+        run: |
+          mkdir -p infra/artifacts
+          cd lambda-src
+          # If you have package.json and deps, run: npm ci --only=production
+          zip -r ../infra/artifacts/lambda.zip ./*
+        shell: bash
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: infra
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: infra
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -out=tfplan
+        working-directory: infra
+
+      - name: Terraform Apply (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -input=false -auto-approve tfplan
+        working-directory: infra
