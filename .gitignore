@@ -147,6 +147,7 @@ tmp/
 Thumbs.db
 .idea/
 private/
+.private/
 # Terraform
 infra/.terraform/
 infra/.terraform.lock.hcl
