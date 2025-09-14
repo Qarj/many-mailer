@@ -9,7 +9,3 @@ https://qarj.github.io/many-mailer/
 https://console.aws.amazon.com/
 
 https://signin.aws.amazon.com/console
-
-## case fix
-
-## nop
