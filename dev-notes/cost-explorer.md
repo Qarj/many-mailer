@@ -30,6 +30,8 @@ Helper script (recommended)
     scripts/ce.sh mtd-service-daily --json
   - Debug (echo the aws command):
     scripts/ce.sh last7-service --debug
+  - Filter to a single service:
+    scripts/ce.sh last7-service --service "Amazon Simple Storage Service"
 
 Raw CLI equivalents
 - Daily unblended cost by service (last 7 days):
@@ -68,3 +70,23 @@ Console paths (for completeness)
 
 Tip
 - If setting alerts, consider an AWS Budget (console) around $5/month for early warning.
+
+Output formatting (script)
+- All currency values are prefixed with a $ sign (e.g., $0.0001662). Numbers without $ are not currency.
+- Usage quantities display their unit when available (e.g., 59.00 Requests, 0.002 GB-Hours).
+- Service names render in a single, fixed-width column (40 chars). This prevents column wobble when the service name has spaces (e.g., “Amazon Simple Storage Service”).
+- For drill-service-usage, the label shows “SERVICE | USAGE_TYPE”.
+- Days with no groups print a single NO_DATA line with the day’s total UnblendedCost.
+
+Example
+  scripts/ce.sh last7-service --start 2025-09-13 --end 2025-09-14
+  2025-09-13  Amazon Simple Storage Service             $0.0001662   59.0015439877 Requests
+  2025-09-13  Amazon API Gateway                        $0.00000222  2.0000003054 Requests
+  2025-09-13  AWS Lambda                                $0           3.04225 Requests
+  2025-09-13  AmazonCloudWatch                          $0           0.0000013532 Metrics
+
+Notes on filters
+- We only include --filter when needed (e.g., --exclude-credits or --service). Passing an empty object {} causes a ValidationException in CE.
+
+Reminder
+- End is exclusive. For a single day, set --start YYYY-MM-DD and --end to the next day.
