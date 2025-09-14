@@ -1,308 +1,357 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export AWS_PAGER=""
 
-# Cost Explorer helper
-# - Clear formatting: money values prefixed with $; usage shows unit.
-# - Fixed-width service column to avoid wobble when names contain spaces.
-# - Subcommands:
-#     mtd-service-daily
-#     last7-service
-#     drill-service-usage
-#     total-mtd
-# - Options:
-#     --start YYYY-MM-DD
-#     --end   YYYY-MM-DD
-#     --exclude-credits     (excludes Credit/Refund/Tax)
-#     --service "SERVICE NAME" (filter to a single SERVICE dimension)
-#     --json   (print raw JSON and exit)
-#     --debug  (echo AWS CLI command before execution)
+# Cost Explorer helper script
+# - Formats output with clear $ for cost and aligned columns.
+# - Avoids passing empty --filter (prevents ValidationException).
+# - Supports optional service filter and usage drilldown.
 #
-# Examples:
-#   scripts/ce.sh mtd-service-daily
-#   scripts/ce.sh last7-service --start 2025-09-01 --end 2025-09-14
-#   scripts/ce.sh drill-service-usage --start 2025-09-13 --end 2025-09-14
-#   scripts/ce.sh total-mtd --exclude-credits
-#   scripts/ce.sh last7-service --service "Amazon Simple Storage Service"
+# Columns (for pretty mode):
+#   Date(10) | Service(40, left) | $Cost(15, right, full precision, no rounding) | Usage(40, right) | Unit(left)
+# Widths are configurable via the variables below.
+#
+# Notes:
+# - End is exclusive (AWS CE convention).
+# - Cost Explorer is global; --region is for the endpoint only.
+#
+# Dependencies: aws, jq
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-
-SUBCMD="${1:-}"; shift || true
-
-START_DATE=""
-END_DATE=""
-EXCLUDE_CREDITS="false"
-ONLY_SERVICE=""
-RAW_JSON="false"
-DEBUG="false"
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --start) START_DATE="${2:?}"; shift 2;;
-    --end) END_DATE="${2:?}"; shift 2;;
-    --exclude-credits) EXCLUDE_CREDITS="true"; shift;;
-    --service) ONLY_SERVICE="${2:?}"; shift 2;;
-    --json) RAW_JSON="true"; shift;;
-    --debug) DEBUG="true"; shift;;
-    -h|--help)
-      cat <<EOF
-Usage: scripts/ce.sh <subcommand> [options]
-Subcommands:
-  mtd-service-daily         Month-to-date, daily, grouped by SERVICE
-  last7-service             Custom range (default last 7 days), grouped by SERVICE
-  drill-service-usage       Custom range, grouped by SERVICE and USAGE_TYPE
-  total-mtd                 Month-to-date totals (no grouping)
-
-Options:
-  --start YYYY-MM-DD        Start date (inclusive)
-  --end   YYYY-MM-DD        End date (exclusive)
-  --exclude-credits         Exclude Credit/Refund/Tax record types
-  --service "SERVICE NAME"  Filter to a single SERVICE (dimension filter)
-  --json                    Print raw JSON (no pretty formatting)
-  --debug                   Echo the AWS CLI command before executing
-  -h, --help                Show this help
-EOF
-      exit 0
-      ;;
-    *)
-      die "Unknown option: $1"
-      ;;
-  esac
-done
+REGION="${AWS_REGION:-us-east-1}"
 
 # Defaults
-if [[ -z "$START_DATE" || -z "$END_DATE" ]]; then
-  case "$SUBCMD" in
-    mtd-service-daily|total-mtd)
-      # Month-to-date
-      START_DATE="$(date -u -d "$(date +%Y-%m-01)" +%Y-%m-%d)"
-      END_DATE="$(date -u +%Y-%m-%d)"
-      ;;
-    last7-service|drill-service-usage|*)
-      # Last 7 days by default
-      START_DATE="${START_DATE:-$(date -u -d "7 days ago" +%Y-%m-%d)}"
-      END_DATE="${END_DATE:-$(date -u +%Y-%m-%d)}"
-      ;;
-  esac
-fi
+CMD=""
+START=""
+END=""
+DEBUG=0
+RAW_JSON=0
+EXCLUDE_CREDITS=0
+SERVICE_FILTER=""
+# Column widths (tweakable)
+DATE_COL=10
+SERVICE_COL=40
+COST_COL=15
+USAGE_COL=40
 
-region="us-east-1" # CE is global; region selects API endpoint only
 
+print_usage() {
+  cat <<EOF
+Usage: scripts/ce.sh <command> [options]
+
+Commands:
+  last7-service           Show daily UnblendedCost and UsageQuantity grouped by SERVICE for a range (default last 7 days)
+  mtd-service-daily       Show month-to-date daily UnblendedCost and UsageQuantity grouped by SERVICE
+  drill-service-usage     Show daily UnblendedCost and UsageQuantity grouped by SERVICE and USAGE_TYPE
+  total-mtd               Show month-to-date total UnblendedCost (no grouping)
+
+Options:
+  --start YYYY-MM-DD      Start date (UTC). For last7-service default is 7 days ago.
+  --end   YYYY-MM-DD      End date (UTC, exclusive). Default is today (UTC).
+  --service "NAME"        Filter to a single service (exact match, e.g., "Amazon Simple Storage Service").
+  --exclude-credits       Exclude Credit/Refund/Tax record types.
+  --json                  Output raw JSON from AWS (no pretty formatting).
+  --debug                 Print the AWS CLI command before running.
+  -h, --help              Show this help.
+
+Examples:
+  scripts/ce.sh last7-service
+  scripts/ce.sh last7-service --start 2025-09-13 --end 2025-09-14
+  scripts/ce.sh last7-service --service "Amazon Simple Storage Service"
+  scripts/ce.sh mtd-service-daily --exclude-credits
+  scripts/ce.sh drill-service-usage --start 2025-09-13 --end 2025-09-14 --service "Amazon API Gateway"
+  scripts/ce.sh total-mtd
+EOF
+}
+
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+# Build a CE filter JSON based on flags. Returns empty string if no filters.
 build_filter_json() {
-  local parts=()
-  if [[ "$EXCLUDE_CREDITS" == "true" ]]; then
-    parts+=('{"Not":{"Dimensions":{"Key":"RECORD_TYPE","Values":["Credit","Refund","Tax"]}}}')
-  fi
-  if [[ -n "$ONLY_SERVICE" ]]; then
-    # Filter to one service
-    # Note: Filtering on SERVICE while grouping by SERVICE is allowed; it just narrows the results.
-    parts+=("{\"Dimensions\":{\"Key\":\"SERVICE\",\"Values\":[\"$ONLY_SERVICE\"]}}")
+  local filters=()
+
+  if [[ -n "$SERVICE_FILTER" ]]; then
+    # Exact match on SERVICE
+    filters+=("{\"Dimensions\":{\"Key\":\"SERVICE\",\"Values\":[\"$SERVICE_FILTER\"],\"MatchOptions\":[\"EQUALS\"]}}")
   fi
 
-  if [[ ${#parts[@]} -eq 0 ]]; then
-    echo "" # No filter flag
-  elif [[ ${#parts[@]} -eq 1 ]]; then
-    echo "${parts[0]}"
+  if [[ "$EXCLUDE_CREDITS" -eq 1 ]]; then
+    # Exclude Credit/Refund/Tax
+    filters+=("{\"Not\":{\"Dimensions\":{\"Key\":\"RECORD_TYPE\",\"Values\":[\"Credit\",\"Refund\",\"Tax\"]}}}")
+  fi
+
+  if [[ "${#filters[@]}" -eq 0 ]]; then
+    echo ""
+  elif [[ "${#filters[@]}" -eq 1 ]]; then
+    # Single filter
+    echo "${filters[0]}"
   else
-    # Combine multiple with And
+    # Combine via And
     local joined
-    joined=$(printf ",%s" "${parts[@]}")
+    joined=$(printf ",%s" "${filters[@]}")
     joined="[${joined:1}]"
-    echo "{\"And\": $joined}"
+    echo "{\"And\":${joined}}"
   fi
 }
 
-run_ce() {
-  local granularity="$1"; shift
-  local metrics=("$@")
-
-  local cmd=(aws ce get-cost-and-usage
-    --region "$region"
-    --time-period "Start=${START_DATE},End=${END_DATE}"
-    --granularity "$granularity"
-  )
-  for m in "${metrics[@]}"; do
-    cmd+=(--metrics "$m")
-  done
-
-  local filter_json
-  filter_json="$(build_filter_json)"
-  if [[ -n "$filter_json" ]]; then
-    cmd+=(--filter "$filter_json")
+# Compute default dates if not provided
+compute_dates() {
+  if [[ -z "$END" ]]; then
+    END=$(date -u +%Y-%m-%d)
   fi
-
-  if [[ "$DEBUG" == "true" ]]; then
-    echo "+ ${cmd[*]}" >&2
+  if [[ -z "$START" ]]; then
+    case "$CMD" in
+      mtd-service-daily|total-mtd)
+        START=$(date -u -d "$(date +%Y-%m-01)" +%Y-%m-%d)
+        ;;
+      *)
+        START=$(date -u -d "7 days ago" +%Y-%m-%d)
+        ;;
+    esac
   fi
-  "${cmd[@]}"
 }
 
-run_ce_grouped() {
-  local granularity="$1"; shift
-  local group_bys=("$1"); shift
-  local metrics=("$@")
+run_aws_ce() {
+  local time_period="Start=$START,End=$END"
+  local metrics="$1"       # space-separated metrics (e.g., "UnblendedCost UsageQuantity")
+  shift
+  local group_bys=("$@")   # each is 'Type=DIMENSION,Key=...'
 
-  local cmd=(aws ce get-cost-and-usage
-    --region "$region"
-    --time-period "Start=${START_DATE},End=${END_DATE}"
-    --granularity "$granularity"
-  )
-  for m in "${metrics[@]}"; do
-    cmd+=(--metrics "$m")
-  done
-  # support one or two group-bys (e.g., SERVICE and USAGE_TYPE)
+  local args=(ce get-cost-and-usage --region "$REGION" --output json --no-cli-pager --time-period "$time_period" --granularity DAILY --metrics $metrics)
   for gb in "${group_bys[@]}"; do
-    cmd+=(--group-by "Type=DIMENSION,Key=${gb}")
+    args+=(--group-by "$gb")
   done
 
   local filter_json
   filter_json="$(build_filter_json)"
   if [[ -n "$filter_json" ]]; then
-    cmd+=(--filter "$filter_json")
+    args+=(--filter "$filter_json")
   fi
 
-  if [[ "$DEBUG" == "true" ]]; then
-    echo "+ ${cmd[*]}" >&2
+  if [[ "$DEBUG" -eq 1 ]]; then
+    # shellcheck disable=SC2145
+    echo "+ aws ${args[@]}" >&2
   fi
-  "${cmd[@]}"
+  aws "${args[@]}"
+}
+is_valid_json() {
+  local payload="${1:-}"
+  # Non-empty and parses as JSON
+  [[ -n "$payload" ]] && echo "$payload" | jq -e . >/dev/null 2>&1
 }
 
-format_money() {
-  # Prefix with $
-  # Input: numeric string (may be "0" or "0.0000123" etc.)
+
+print_header_if_any() {
+  # Optional: print header once in pretty mode
+  printf "%-*s  %-*s  %*s  %*s  %s\n" \
+    "$DATE_COL" "Date" \
+    "$SERVICE_COL" "Service" \
+    "$COST_COL" "\$Cost(USD)" \
+    "$USAGE_COL" "Usage" \
+    "Unit"
+}
+
+format_amount_or_zero() {
   local amount="$1"
   if [[ -z "$amount" || "$amount" == "null" ]]; then
-    printf "%s" ""
+    echo "0"
   else
-    printf "\$%s" "$amount"
+    echo "$amount"
   fi
 }
 
-pretty_print_grouped_service() {
-  # Input: JSON from CE with group-by SERVICE (and optionally USAGE_TYPE)
-  local include_usage="$1"    # "true" or "false"
-  local include_usage_type="$2" # "true" if second group key is USAGE_TYPE
+pretty_print_service_daily() {
+  # Input: full JSON from CE for grouping by SERVICE
+  local json="$1"
 
-  # We will emit tab-separated fields from jq: date, label, cost_amount, usage_amount, usage_unit
-  # Then printf with fixed widths and with $ for money.
-  jq -r --argjson include_usage "$([[ "$include_usage" == "true" ]] && echo true || echo false)" \
-        --argjson include_usage_type "$([[ "$include_usage_type" == "true" ]] && echo true || echo false)" '
+  # Transform to TSV with jq first; only print header after successful jq.
+  local body
+  if ! body="$(printf '%s' "$json" | jq -r '
     .ResultsByTime[] as $day
     | if (($day.Groups | length) > 0) then
         $day.Groups[]
         | . as $g
         | $day.TimePeriod.Start as $date
         | ($g.Keys[0] // "UNKNOWN") as $service
-        | ($g.Keys[1] // null) as $usageType
         | ($g.Metrics.UnblendedCost.Amount // "0") as $costAmt
-        | (if $include_usage then ($g.Metrics.UsageQuantity.Amount // null) else null end) as $usageAmt
-        | (if $include_usage then ($g.Metrics.UsageQuantity.Unit // null) else null end) as $usageUnit
-        | if $include_usage_type and ($usageType != null) then
-            [$date, ($service + " | " + $usageType), $costAmt, ($usageAmt // ""), ($usageUnit // "")]
-          else
-            [$date, $service, $costAmt, ($usageAmt // ""), ($usageUnit // "")]
-          end
+        | ($g.Metrics.UsageQuantity.Amount // "") as $usageAmt
+        | ($g.Metrics.UsageQuantity.Unit // "") as $usageUnit
+        | [$date, $service, $costAmt, $usageAmt, $usageUnit]
         | @tsv
       else
-        # No groups for that day; print a NO_DATA line using totals
         ($day.Total.UnblendedCost.Amount // "0") as $costAmt
         | [$day.TimePeriod.Start, "NO_DATA", $costAmt, "", ""]
         | @tsv
       end
-  ' | awk -F'\t' '
-      BEGIN { OFS="\t"; }
-      {
-        date=$1; label=$2; cost=$3; usageAmt=$4; usageUnit=$5;
-        # Prefix cost with $
-        if (cost == "" || cost == "null") cost_str="";
-        else cost_str="$" cost;
-        # Usage with unit (if present)
-        usage_str="";
-        if (usageAmt != "" && usageAmt != "null") {
-          usage_str=usageAmt;
-          if (usageUnit != "" && usageUnit != "null") usage_str=usage_str " " usageUnit;
-        }
-        # Print with fixed widths: date (10), label (40), cost (12), usage (rest)
-        printf "%-10s  %-40s  %12s  %s\n", date, label, cost_str, usage_str;
-      }
-  '
-}
-
-pretty_print_total() {
-  # Input: JSON with no groups, just Totals by day (or overall depending on request)
-  jq -r '
-    .ResultsByTime[] as $day
-    | $day.TimePeriod.Start as $date
-    | ($day.Total.UnblendedCost.Amount // "0") as $costAmt
-    | ($day.Total.UnblendedCost.Unit // "USD") as $unit
-    | [$date, $costAmt, $unit]
-    | @tsv
-  ' | awk -F'\t' '
-      BEGIN { OFS="\t"; }
-      {
-        date=$1; cost=$2; unit=$3;
-        cost_str="";
-        if (cost != "" && cost != "null") cost_str="$" cost;
-        printf "%-10s  %12s  %s\n", date, cost_str, unit;
-      }
-  '
-}
-
-case "$SUBCMD" in
-  mtd-service-daily)
-    if [[ "$RAW_JSON" == "true" ]]; then
-      run_ce_grouped "DAILY" "SERVICE" "UnblendedCost" "UsageQuantity"
-      exit 0
-    fi
-    run_ce_grouped "DAILY" "SERVICE" "UnblendedCost" "UsageQuantity" \
-      | pretty_print_grouped_service "true" "false"
-    ;;
-
-  last7-service)
-    if [[ "$RAW_JSON" == "true" ]]; then
-      run_ce_grouped "DAILY" "SERVICE" "UnblendedCost" "UsageQuantity"
-      exit 0
-    fi
-    run_ce_grouped "DAILY" "SERVICE" "UnblendedCost" "UsageQuantity" \
-      | pretty_print_grouped_service "true" "false"
-    ;;
-
-  drill-service-usage)
-    if [[ "$RAW_JSON" == "true" ]]; then
-      run_ce_grouped "DAILY" "SERVICE" "UnblendedCost" "UsageQuantity" \
-        -- "USAGE_TYPE"
-      exit 0
-    fi
-    # Manual call because run_ce_grouped signature is simpler; emulate two group-bys here.
+  ' 2>/dev/null)"; then
+    echo "Error: failed to parse AWS JSON in pretty_print_service_daily." >&2
+    return 1
+  fi
+  print_header_if_any
+  awk -F'\t' -v date_w="$DATE_COL" -v svc_w="$SERVICE_COL" -v cost_w="$COST_COL" -v usage_w="$USAGE_COL" '
+    BEGIN { OFS="\t"; }
     {
-      cmd=(aws ce get-cost-and-usage
-        --region "$region"
-        --time-period "Start=${START_DATE},End=${END_DATE}"
-        --granularity DAILY
-        --metrics UnblendedCost
-        --metrics UsageQuantity
-        --group-by "Type=DIMENSION,Key=SERVICE"
-        --group-by "Type=DIMENSION,Key=USAGE_TYPE"
-      )
-      filter_json="$(build_filter_json)"
-      if [[ -n "$filter_json" ]]; then
-        cmd+=(--filter "$filter_json")
-      fi
-      if [[ "$DEBUG" == "true" ]]; then
-        echo "+ ${cmd[*]}" >&2
-      fi
-      "${cmd[@]}"
-    } | pretty_print_grouped_service "true" "true"
-    ;;
+      date=$1; label=$2; cost=$3; usageAmt=$4; usageUnit=$5;
+      if (cost == "" || cost == "null") cost_str="";
+      else cost_str="$" cost;
+      usage_str="";
+      if (usageAmt != "" && usageAmt != "null") {
+        usage_str=usageAmt;
+        if (usageUnit != "" && usageUnit != "null") usage_str=usage_str " " usageUnit;
+      }
+      # Normalize unit placeholders
+      gsub(/^(N\/A|None|-|null)$/, "", usageUnit);
+      printf "%-*s  %-*s  %*s  %s\n", date_w, date, svc_w, label, cost_w, cost_str, usage_str;
+    }
+  ' <<< "$body"
+}
 
-  total-mtd)
-    if [[ "$RAW_JSON" == "true" ]]; then
-      run_ce "DAILY" "UnblendedCost"
-      exit 0
+pretty_print_service_usage_daily() {
+  # Input: full JSON from CE for grouping by SERVICE and USAGE_TYPE
+  local json="$1"
+
+  local body
+  if ! body="$(printf '%s' "$json" | jq -r '
+    .ResultsByTime[] as $day
+    | if (($day.Groups | length) > 0) then
+        $day.Groups[]
+        | . as $g
+        | $day.TimePeriod.Start as $date
+        | ($g.Keys[0] // "UNKNOWN") as $service
+        | ($g.Keys[1] // "UNKNOWN_USAGE") as $usageType
+        | ($g.Metrics.UnblendedCost.Amount // "0") as $costAmt
+        | ($g.Metrics.UsageQuantity.Amount // "") as $usageAmt
+        | ($g.Metrics.UsageQuantity.Unit // "") as $usageUnit
+        | [$date, ($service + " | " + $usageType), $costAmt, $usageAmt, $usageUnit]
+        | @tsv
+      else
+        ($day.Total.UnblendedCost.Amount // "0") as $costAmt
+        | [$day.TimePeriod.Start, "NO_DATA", $costAmt, "", ""]
+        | @tsv
+      end
+  ' 2>/dev/null)"; then
+    echo "Error: failed to parse AWS JSON in pretty_print_service_usage_daily." >&2
+    return 1
+  fi
+  print_header_if_any
+  awk -F'\t' -v date_w="$DATE_COL" -v svc_w="$SERVICE_COL" -v cost_w="$COST_COL" -v usage_w="$USAGE_COL" '
+    BEGIN { OFS="\t"; }
+    {
+      date=$1; label=$2; cost=$3; usageAmt=$4; usageUnit=$5;
+      if (cost == "" || cost == "null") cost_str="";
+      else cost_str="$" cost;
+      usage_str="";
+      if (usageAmt != "" && usageAmt != "null") {
+        usage_str=usageAmt;
+        if (usageUnit != "" && usageUnit != "null") usage_str=usage_str " " usageUnit;
+      }
+      gsub(/^(N\/A|None|-|null)$/, "", usageUnit);
+      printf "%-*s  %-*s  %*s  %s\n", date_w, date, svc_w, label, cost_w, cost_str, usage_str;
+    }
+  ' <<< "$body"
+}
+
+pretty_print_total_daily() {
+  # For total-mtd: we print per-day totals (no groups)
+  local json="$1"
+  # Simpler header for totals
+  local body
+  if ! body="$(printf '%s' "$json" | jq -r '
+    .ResultsByTime[]
+    | [$ .TimePeriod.Start, (.Total.UnblendedCost.Amount // "0"), "USD"]
+    | @tsv
+  ' 2>/dev/null)"; then
+    echo "Error: failed to parse AWS JSON in pretty_print_total_daily." >&2
+    return 1
+  fi
+  printf "%-*s  %*s  %s\n" "$DATE_COL" "Date" "$COST_COL" "\$Cost(USD)" "Unit"
+  awk -F'\t' -v date_w="$DATE_COL" -v cost_w="$COST_COL" '
+    BEGIN { OFS="\t"; }
+    {
+      date=$1; cost=$2; unit=$3;
+      cost_str="";
+      if (cost != "" && cost != "null") cost_str="$" cost;
+      printf "%-*s  %*s  %s\n", date_w, date, cost_w, cost_str, unit;
+    }
+  ' <<< "$body"
+}
+
+# Parse args
+if [[ $# -lt 1 ]]; then
+  print_usage
+  exit 1
+fi
+CMD="$1"; shift
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --start) START="${2:-}"; shift 2 ;;
+    --end) END="${2:-}"; shift 2 ;;
+    --exclude-credits) EXCLUDE_CREDITS=1; shift ;;
+    --service) SERVICE_FILTER="${2:-}"; shift 2 ;;
+    --json) RAW_JSON=1; shift ;;
+    --debug) DEBUG=1; shift ;;
+    -h|--help) print_usage; exit 0 ;;
+    *) die "Unknown option: $1" ;;
+  esac
+done
+
+compute_dates
+
+case "$CMD" in
+  last7-service)
+    # SERVICE grouping, include UsageQuantity
+    RAW=$(run_aws_ce "UnblendedCost UsageQuantity" "Type=DIMENSION,Key=SERVICE")
+    if [[ "$RAW_JSON" -eq 1 ]]; then
+      echo "$RAW"
+    else
+      if ! is_valid_json "$RAW"; then
+        echo "Error: AWS response is empty or not valid JSON. Use --debug or --json to investigate." >&2
+        exit 1
+      fi
+      pretty_print_service_daily "$RAW"
     fi
-    run_ce "DAILY" "UnblendedCost" | pretty_print_total
     ;;
-
+  mtd-service-daily)
+    RAW=$(run_aws_ce "UnblendedCost UsageQuantity" "Type=DIMENSION,Key=SERVICE")
+    if [[ "$RAW_JSON" -eq 1 ]]; then
+      echo "$RAW"
+    else
+      if ! is_valid_json "$RAW"; then
+        echo "Error: AWS response is empty or not valid JSON. Use --debug or --json to investigate." >&2
+        exit 1
+      fi
+      pretty_print_service_daily "$RAW"
+    fi
+    ;;
+  drill-service-usage)
+    RAW=$(run_aws_ce "UnblendedCost UsageQuantity" "Type=DIMENSION,Key=SERVICE" "Type=DIMENSION,Key=USAGE_TYPE")
+    if [[ "$RAW_JSON" -eq 1 ]]; then
+      echo "$RAW"
+    else
+      if ! is_valid_json "$RAW"; then
+        echo "Error: AWS response is empty or not valid JSON. Use --debug or --json to investigate." >&2
+        exit 1
+      fi
+      pretty_print_service_usage_daily "$RAW"
+    fi
+    ;;
+  total-mtd)
+    RAW=$(run_aws_ce "UnblendedCost")
+    if [[ "$RAW_JSON" -eq 1 ]]; then
+      echo "$RAW"
+    else
+      if ! is_valid_json "$RAW"; then
+        echo "Error: AWS response is empty or not valid JSON. Use --debug or --json to investigate." >&2
+        exit 1
+      fi
+      pretty_print_total_daily "$RAW"
+    fi
+    ;;
   *)
-    die "Unknown subcommand: ${SUBCMD}. Try -h."
+    die "Unknown command: $CMD"
     ;;
 esac
+
