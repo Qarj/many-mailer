@@ -14,9 +14,9 @@ resource "aws_iam_role" "lambda_exec" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{
-      Effect = "Allow",
+      Effect    = "Allow",
       Principal = { Service = "lambda.amazonaws.com" },
-      Action   = "sts:AssumeRole"
+      Action    = "sts:AssumeRole"
     }]
   })
 }
@@ -52,11 +52,11 @@ resource "aws_iam_role_policy" "lambda_dynamo_inline" {
 }
 
 resource "aws_lambda_function" "api" {
-  function_name = "many-mailer-api"
-  role          = aws_iam_role.lambda_exec.arn
-  handler       = "index.handler"       # index.js exports handler
-  runtime       = "nodejs20.x"
-  filename      = "${path.module}/artifacts/lambda.zip"
+  function_name    = "many-mailer-api"
+  role             = aws_iam_role.lambda_exec.arn
+  handler          = "index.handler" # index.js exports handler
+  runtime          = "nodejs20.x"
+  filename         = "${path.module}/artifacts/lambda.zip"
   source_code_hash = filebase64sha256("${path.module}/artifacts/lambda.zip")
   environment {
     variables = {
@@ -78,9 +78,9 @@ resource "aws_apigatewayv2_api" "http" {
   name          = "many-mailer-http"
   protocol_type = "HTTP"
   cors_configuration {
-    allow_origins = ["https://qarj.github.io","http://localhost:7075"]
-    allow_methods = ["GET","POST","PUT","DELETE","OPTIONS"]
-    allow_headers = ["content-type","authorization"]
+    allow_origins = ["https://qarj.github.io", "http://localhost:7075"]
+    allow_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allow_headers = ["content-type", "authorization"]
   }
 }
 
