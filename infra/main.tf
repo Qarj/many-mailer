@@ -46,6 +46,15 @@ resource "aws_lambda_function" "api" {
     }
   }
 }
+# Explicit log group for the Lambda with 7-day retention.
+# If this log group already exists (created automatically by Lambda),
+# import it with:
+#   terraform import aws_cloudwatch_log_group.lambda_logs "/aws/lambda/many-mailer-api"
+resource "aws_cloudwatch_log_group" "lambda_logs" {
+  name              = "/aws/lambda/${aws_lambda_function.api.function_name}"
+  retention_in_days = 7
+}
+
 
 resource "aws_apigatewayv2_api" "http" {
   name          = "many-mailer-http"

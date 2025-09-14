@@ -9,4 +9,11 @@ terraform {
 }
 provider "aws" {
   region = var.aws_region
+
+  # Apply consistent tags across all supported AWS resources
+  default_tags {
+    tags = {
+      Project = "many-mailer"
+    }
+  }
 }
