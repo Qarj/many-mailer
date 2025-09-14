@@ -12,4 +12,4 @@ https://signin.aws.amazon.com/console
 
 ## case fix
 
-## CI
+## nop
