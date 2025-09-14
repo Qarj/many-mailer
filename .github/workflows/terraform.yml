@@ -17,6 +17,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Terraform fmt -check
+        run: terraform -chdir=infra fmt -check
+
 
       - name: Show OIDC claims
         run: |

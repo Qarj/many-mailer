@@ -27,10 +27,28 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# DynamoDB access for your CRUD (broad to start; least-privilege later)
-resource "aws_iam_role_policy_attachment" "lambda_dynamo" {
-  role       = aws_iam_role.lambda_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+# Inline least-privilege IAM policy for Lambda access to the specific DynamoDB table
+resource "aws_iam_role_policy" "lambda_dynamo_inline" {
+  name = "many-mailer-lambda-dynamo-inline"
+  role = aws_iam_role.lambda_exec.name
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ],
+        Resource = aws_dynamodb_table.items.arn
+      }
+    ]
+  })
 }
 
 resource "aws_lambda_function" "api" {
